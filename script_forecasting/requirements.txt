@@ -1,0 +1,11 @@
+pandas
+prophet
+pystan
+boto3
+pymysql
+sqlalchemy
+numpy
+cython
+setuptools
+wheel
+plotly
