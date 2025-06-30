@@ -11,9 +11,8 @@ CREATE TABLE IF NOT EXISTS phppos_item_variation_forecasts (
     demand_lt FLOAT,
     sigma_lt FLOAT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (variation_id, location_id)
-        REFERENCES phppos_location_item_variations(item_variation_id, location_id)
-        ON DELETE CASCADE
+    FOREIGN KEY (location_id)
+        REFERENCES phppos_locations(location_id)
 );
 
 CREATE TABLE IF NOT EXISTS phppos_sales_forecast (
@@ -28,5 +27,9 @@ CREATE TABLE IF NOT EXISTS phppos_sales_forecast (
 );
 
 ALTER TABLE phppos_location_item_variations
+    ADD COLUMN IF NOT EXISTS forecasted_reorder_level INT DEFAULT NULL,
+    ADD COLUMN IF NOT EXISTS forecasted_replenish_level INT DEFAULT NULL;
+
+ALTER TABLE phppos_location_items
     ADD COLUMN IF NOT EXISTS forecasted_reorder_level INT DEFAULT NULL,
     ADD COLUMN IF NOT EXISTS forecasted_replenish_level INT DEFAULT NULL;
