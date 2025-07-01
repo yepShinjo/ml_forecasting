@@ -1,3 +1,8 @@
+"""
+    This is script WITH argparse for choosing which or what amount of DB will be forecasted on
+"""
+
+import argparse
 import pandas as pd
 import numpy as np
 from prophet import Prophet
@@ -19,8 +24,6 @@ def ensure_column_exists(engine, table, column, dtype):
             conn.execute(sqlalchemy.text(add_sql))
 
 def ensure_schema(engine):
-    ensure_column_exists(engine, "phppos_location_item_variations", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-    ensure_column_exists(engine, "phppos_location_item_variations", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
     ensure_column_exists(engine, "phppos_location_item_variations", "forecasted_reorder_level", "INT DEFAULT NULL")
     ensure_column_exists(engine, "phppos_location_item_variations", "forecasted_replenish_level", "INT DEFAULT NULL")
 
@@ -34,46 +37,48 @@ def upsert_forecasted_levels(results_df, engine):
                     location_id,
                     item_variation_id,
                     forecasted_reorder_level,
-                    forecasted_replenish_level,
+                    forecasted_replenish_level
                 )
                 VALUES (
                     :location_id,
                     :item_variation_id,
-                    :reorder_level,
-                    :replenish_level,
+                    :forecasted_reorder_level,
+                    :forecasted_replenish_level
                 )
                 ON DUPLICATE KEY UPDATE
-                    forecasted_reorder_level = :reorder_level,
-                    forecasted_replenish_level = :replenish_level,
+                    forecasted_reorder_level = :forecasted_reorder_level,
+                    forecasted_replenish_level = :forecasted_replenish_level
             """), {
                 "location_id": row['location_id'],
                 "item_variation_id": row['variation_id'],
-                "reorder_level": row['reorder_level'],
-                "replenish_level": row['replenish_level'],
+                "forecasted_reorder_level": row['forecasted_reorder_level'],
+                "forecasted_replenish_level": row['forecasted_replenish_level']
             })
 
 # ========== 3. Write Full ML Results ==========
 
 def write_results_to_db(results_df, engine):
     create_table_query = """
-    CREATE TABLE IF NOT EXISTS forecast_results (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        location_id INT,
-        item_id INT,
-        variation_id INT,
-        reorder_level INT,
-        replenish_level INT,
-        enough_history BOOLEAN,
-        z_score FLOAT,
-        demand_lt FLOAT,
-        sigma_lt FLOAT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """
+            CREATE TABLE IF NOT EXISTS phppos_item_variation_forecasts (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                item_id INT,
+                variation_id INT,
+                location_id INT,
+                forecasted_reorder_level INT,
+                forecasted_replenish_level INT,
+                enough_history BOOLEAN,
+                z_score FLOAT,
+                demand_lt FLOAT,
+                sigma_lt FLOAT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (location_id)
+                    REFERENCES phppos_locations(location_id)
+            );
+        """
     with engine.connect() as conn:
         conn.execute(sqlalchemy.text(create_table_query))
     results_df.to_sql(
-        'forecast_results',
+        'phppos_item_variation_forecasts',
         engine,
         if_exists='append',
         index=False,
@@ -83,31 +88,36 @@ def write_results_to_db(results_df, engine):
 # ========== 4. Get All DBs to Process ==========
 
 EXCLUDE_DBS = [
-    'phpmyadmin', 'phpmyadmin2', 'horde', 'phppoint_forums', 'staging_site',
+    'phpmyadmin', 'phpmyadmin2', 'horde', 'phppoint_forums', 'staging_site', 'sys',
     'roundcube', 'pos', 'bntennis_site', 'mysql', 'information_schema', 'performance_schema'
 ]
 
 DB_SERVERS = [
-    {'host': 'database-2.ccv8sgeuslw7.us-east-1.rds.amazonaws.com', 'user': 'admin', 'password': 'GUNGBUILDYEp_69'}
+    {'host': 'database-2.ccv8sgeuslw7.us-east-1.rds.amazonaws.com', 'user': 'admin', 'password': 'GUNGBUILDYEp_69'},
+    {'host': 'database-3.ccv8sgeuslw7.us-east-1.rds.amazonaws.com', 'user': 'admin', 'password': 'GUNGBUILDYEp_69'}
 ]
 
-def get_databases_to_process():
+
+
+def get_databases_to_process(server):
+
     databases = []
-    for server in DB_SERVERS:
-        try:
-            conn = pymysql.connect(
-                host=server['host'],
-                user=server['user'],
-                password=server['password']
-            )
-            with conn.cursor() as cur:
-                cur.execute('SHOW DATABASES')
-                for (db_name,) in cur.fetchall():
-                    if db_name not in EXCLUDE_DBS:
-                        databases.append(db_name.replace('staging', ''))
-            conn.close()
-        except Exception as ex:
-            print(f"Error connecting to {server['host']}: {ex}")
+
+    try:
+        conn = pymysql.connect(
+            host=server['host'],
+            user=server['user'],
+            password=server['password'],
+            port=server.get('port', 3306)
+        )
+        with conn.cursor() as cur:
+            cur.execute('SHOW DATABASES')
+            for (db_name,) in cur.fetchall():
+                if db_name not in EXCLUDE_DBS:
+                    databases.append(db_name.replace('staging', ''))
+        conn.close()
+    except Exception as ex:
+        print(f"Error connecting to {server['host']}: {ex}")
     return databases
 
 # ========== 5. Forecasting Logic ==========
@@ -131,7 +141,7 @@ def run_forecast_for_database(conn_str, output_path=None):
     variations_df['sale_date'] = pd.to_datetime(variations_df['sale_time']).dt.date
 
     agg_df = variations_df.groupby(
-        ['sale_date', 'item_variation_id', 'location_id', 'variation_name', 'name']
+        ['sale_date', 'item_id', 'item_variation_id', 'location_id', 'variation_name', 'name']
     )['quantity_purchased'].sum().reset_index()
 
     # track returns for inspection if needed
@@ -141,6 +151,7 @@ def run_forecast_for_database(conn_str, output_path=None):
     recent_daily_var_sales = agg_df.rename(
         columns={
             'sale_date': 'date',
+            'item_id': 'item_id',
             'item_variation_id': 'variation_id',
             'quantity_purchased': 'y'
         }
@@ -197,7 +208,7 @@ def run_forecast_for_database(conn_str, output_path=None):
     )
 
     grouped_sales = (
-        recent_12m.groupby(['date', 'location_id', 'variation_id'])
+        recent_12m.groupby(['date', 'location_id', 'item_id', 'variation_id'])
         .agg({'y': 'sum'})
         .reset_index()
     )
@@ -211,7 +222,7 @@ def run_forecast_for_database(conn_str, output_path=None):
     lead_time_days = 7
     results = []
     min_sigma = 1
-    for (loc, var), group in grouped_sales.groupby(['location_id', 'variation_id']):
+    for (loc, item, var), group in grouped_sales.groupby(['location_id', 'item_id', 'variation_id']):
         enough = group['enough_history'].iloc[0]
         group = group.sort_values('date')
         prophet_df = group[['date', 'y']].rename(columns={'date': 'ds', 'y': 'y'})
@@ -248,11 +259,13 @@ def run_forecast_for_database(conn_str, output_path=None):
             reorder_level = int(np.round(demand_lt))
             replenish_level = int(np.round(demand_lt * 2))
 
+        item_id = group['item_id'].iloc[0] if 'item_id' in group.columns else None
         results.append({
             'location_id': loc,
+            'item_id': item_id,
             'variation_id': var,
-            'reorder_level': reorder_level,
-            'replenish_level': replenish_level,
+            'forecasted_reorder_level': reorder_level,
+            'forecasted_replenish_level': replenish_level,
             'enough_history': enough,
             'z_score': z,
             'demand_lt': demand_lt,
@@ -267,24 +280,51 @@ def run_forecast_for_database(conn_str, output_path=None):
 # ========== 6. Main Orchestration ==========
 
 def main():
-    db_user = "admin"
-    db_password = "GUNGBUILDYEp_69"
-    db_host = "database-2.ccv8sgeuslw7.us-east-1.rds.amazonaws.com"
-    db_port = 3306
-    dbs_to_process = get_databases_to_process()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        'db_arg',
+        help="Use -1 for all DBs, N (positive int) for first N DBs, or the DB name for a single DB"
+    )
+    args = parser.parse_args()
+    arg = args.db_arg
 
-    for db_name in dbs_to_process:
-        conn_str = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-        print(f"Processing forecasts for DB: {db_name}")
-        engine = sqlalchemy.create_engine(conn_str)
+    # Loop through all DB_SERVERS (even if just one)
+    for server in DB_SERVERS:
+        dbs_to_process = get_databases_to_process(server)
+        if not dbs_to_process:
+            print(f"No databases found on {server['host']}.")
+            continue
+
+        # Select which DB(s) to process
         try:
-            ensure_schema(engine)
-            results_df = run_forecast_for_database(conn_str, output_path=f"forecast_{db_name}.csv")
-            write_results_to_db(results_df, engine)
-            upsert_forecasted_levels(results_df, engine)
-            print(f"Finished {db_name}")
-        except Exception as e:
-            print(f"Failed for {db_name}: {e}")
+            num = int(arg)
+            if num == -1:
+                dbs_selected = dbs_to_process  # all
+            elif num > 0:
+                dbs_selected = dbs_to_process[:num]  # first N
+            else:
+                print("Invalid argument. Use -1, a positive number, or a DB name.")
+                continue
+        except ValueError:
+            if arg in dbs_to_process:
+                dbs_selected = [arg]
+            else:
+                print(f"Database '{arg}' not found in available databases: {dbs_to_process}")
+                continue
+
+        # Run forecasting for each selected DB
+        for db_name in dbs_selected:
+            conn_str = f"mysql+pymysql://{server['user']}:{server['password']}@{server['host']}:{server.get('port', 3306)}/{db_name}"
+            print(f"Processing forecasts for DB: {db_name} on server {server['host']}")
+            engine = sqlalchemy.create_engine(conn_str)
+            try:
+                ensure_schema(engine)
+                results_df = run_forecast_for_database(conn_str, output_path=f"forecast_{db_name}.csv")
+                write_results_to_db(results_df, engine)
+                upsert_forecasted_levels(results_df, engine)
+                print(f"Finished {db_name}")
+            except Exception as e:
+                print(f"Failed for {db_name}: {e}")
 
 if __name__ == "__main__":
     main()
