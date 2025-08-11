@@ -289,6 +289,28 @@ def main():
     arg = args.db_arg
 
     # Loop through all DB_SERVERS (even if just one)
+
+        # -------------------------------------------------------
+        # Database Selection Logic
+        # -------------------------------------------------------
+        # This block determines which database(s) from the current
+        # server will be processed for forecasting based on the CLI
+        # argument `db_arg`:
+        #
+        # 1. If `db_arg` can be converted to an integer:
+        #    - -1  → Select ALL available databases on this server.
+        #    - >0  → Select only the first N databases in the list.
+        #    -  0 or negative (except -1) → Invalid input → skip.
+        #
+        # 2. If `db_arg` is NOT an integer (ValueError raised):
+        #    - If it matches a database name in the list → select
+        #      that single database.
+        #    - Otherwise → print an error and skip this server.
+        #
+        # At the end, `dbs_selected` will contain the list of
+        # databases to run forecasting on for this server.
+        # -------------------------------------------------------
+    
     for server in DB_SERVERS:
         dbs_to_process = get_databases_to_process(server)
         if not dbs_to_process:
@@ -313,6 +335,7 @@ def main():
                 continue
 
         # Run forecasting for each selected DB
+        
         for db_name in dbs_selected:
             conn_str = f"mysql+pymysql://{server['user']}:{server['password']}@{server['host']}:{server.get('port', 3306)}/{db_name}"
             print(f"Processing forecasts for DB: {db_name} on server {server['host']}")
