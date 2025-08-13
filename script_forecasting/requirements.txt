@@ -1,0 +1,5 @@
+pandas
+numpy
+SQLAlchemy>=2
+PyMySQL
+prophet==1.1.5
